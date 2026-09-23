@@ -1,0 +1,1277 @@
+--[[
+	XANU HUB — Drone / Vehicle / Antiair / Player Box ESP
+	Access key : ILovenuggets6093Plus
+	Drone ESP  : RightShift
+	Hide/Show  : Insert
+]]
+
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+local Workspace        = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local ACCESS_KEY  = "ILovenuggets6093Plus"
+
+-- ====================== THEME ======================
+local AC = {
+	bg     = Color3.fromRGB(13, 13, 18),
+	panel  = Color3.fromRGB(21, 21, 28),
+	row    = Color3.fromRGB(30, 30, 39),
+	stroke = Color3.fromRGB(48, 48, 62),
+	text   = Color3.fromRGB(238, 238, 246),
+	sub    = Color3.fromRGB(148, 148, 168),
+	on     = Color3.fromRGB(0, 205, 145),
+	off    = Color3.fromRGB(68, 68, 82),
+	acc1   = Color3.fromRGB(130, 80, 255),
+	acc2   = Color3.fromRGB(0, 190, 255),
+}
+
+-- ====================== DRONE ESP CONFIG ======================
+local NAMES = {
+	"flamingo", "neptun", "stormshadow", "kalibr", "shahed136", "lutiy",
+	"gerbera", "fp1", "bober", "shahed107", "lisica", "bm35", "italmas",
+	"molniyauav", "molniya2", "hello", "kub", "darts", "shahed238", "chaklyn",
+	"geran5", "ztk", "zhuk", "greywidow", "delta", "geranseeker", "fpv",
+	"fpvvandal", "fpvold", "hornet", "lancet", "swithbl", "x10",
+}
+
+local DRONE_BOX_COLOR = Color3.fromRGB(255, 255, 0)
+local DRONE_LABEL     = true
+local INFINITE_RANGE  = true
+local MAX_DIST        = 4000
+local POLL            = 0.2
+local TRACK_MODELS    = true
+local MOVE_THRESHOLD  = 0.7
+local STATIONARY_TIME = 1.5
+local REMOVE_WHEN_STILL = false
+local MIN_PROJECT_DIST  = 2
+local MAX_BOX_PIXELS    = 4000
+local FOLDER_RESCAN     = 3
+
+local FOLDER_CATS = {
+	Vehicle = {
+		key      = "VehicleESP",
+		color    = Color3.fromRGB(255, 165, 0),
+		label    = "VEHICLE",
+		useName  = false,
+		keywords = { "vehicle", "vehicles", "veh" },
+		rootName = "Structures",
+		fallbackRoot = true,
+	},
+	Antiair = {
+		key      = "AntiairESP",
+		color    = Color3.fromRGB(255, 70, 90),
+		label    = "ANTIAIR",
+		useName  = false,
+		keywords = { "antiair", "antiaircraft", "anti-air" },
+		rootName = nil,
+		fallbackRoot = false,
+	},
+}
+
+-- ====================== TEAM BOX ESP CONFIG ======================
+local TEAM_COLORS = {
+	Civilian = Color3.fromRGB(120, 255, 130),
+	Defender = Color3.fromRGB(90, 175, 255),
+	Operator = Color3.fromRGB(255, 120, 95),
+}
+local BOX_THICKNESS  = 1.6
+local BOX_FILL_ALPHA = 0.88
+
+-- ====================== STATE ======================
+local state = {
+	PartESP          = false,
+	VehicleESP       = false,
+	AntiairESP       = false,
+	CivilianESP      = false,
+	DefenderESP      = false,
+	OperatorESP      = false,
+	PlayerInfinite   = true,
+	PlayerRange      = 2500,
+	ShowDistance     = false,
+}
+
+local RANGE_MIN, RANGE_MAX = 100, 5000
+
+-- ====================== HELPERS ======================
+local function guiRoot()
+	local ok, h = pcall(function() return gethui() end)
+	if ok and h then return h end
+	return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local function corner(obj, r)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, r or 8)
+	c.Parent = obj
+	return c
+end
+
+local function stroke(obj, col, th)
+	local s = Instance.new("UIStroke")
+	s.Color = col or AC.stroke
+	s.Thickness = th or 1
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	s.Parent = obj
+	return s
+end
+
+local function stripName(s)
+	return (tostring(s):lower():gsub("[^%w]", ""))
+end
+
+local function makeDraggable(frame, handle)
+	local dragging, dragStart, startPos
+	handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging  = true
+			dragStart = input.Position
+			startPos  = frame.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+	handle.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch) then
+			local d = input.Position - dragStart
+			frame.Position = UDim2.new(
+				startPos.X.Scale, startPos.X.Offset + d.X,
+				startPos.Y.Scale, startPos.Y.Offset + d.Y)
+		end
+	end)
+end
+
+-- ==================================================================
+--  BOX PROJECTION + SHARED BOX ENTRY
+-- ==================================================================
+local function getPos(obj)
+	if obj:IsA("BasePart") then return obj.Position end
+	local ok, p = pcall(function() return obj:GetPivot().Position end)
+	if ok then return p end
+	return nil
+end
+
+local function projectBox(inst, cam)
+	local cf, size
+	local ok = pcall(function()
+		cf, size = inst:GetBoundingBox()
+	end)
+	if not ok or not cf or not size then return nil end
+
+	if (cf.Position - cam.CFrame.Position).Magnitude < MIN_PROJECT_DIST then
+		return nil
+	end
+
+	size = size + Vector3.new(0.25, 0.25, 0.25)
+	local half = size * 0.5
+	local minX, minY = math.huge, math.huge
+	local maxX, maxY = -math.huge, -math.huge
+	local any = false
+
+	for xi = -1, 1, 2 do
+		for yi = -1, 1, 2 do
+			for zi = -1, 1, 2 do
+				local world = (cf * CFrame.new(half.X * xi, half.Y * yi, half.Z * zi)).Position
+				local vp = cam:WorldToViewportPoint(world)
+				if vp.Z > 0.01 then
+					any = true
+					if vp.X < minX then minX = vp.X end
+					if vp.Y < minY then minY = vp.Y end
+					if vp.X > maxX then maxX = vp.X end
+					if vp.Y > maxY then maxY = vp.Y end
+				end
+			end
+		end
+	end
+
+	if not any then return nil end
+	if (maxX - minX) > MAX_BOX_PIXELS or (maxY - minY) > MAX_BOX_PIXELS then return nil end
+	return minX, minY, maxX, maxY
+end
+
+local function newBoxEntry(parentGui, obj, color, labelText)
+	local frame = Instance.new("Frame")
+	frame.Name = "Box"
+	frame.BackgroundColor3 = color
+	frame.BackgroundTransparency = BOX_FILL_ALPHA
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.ZIndex = 2
+	frame.Parent = parentGui
+	corner(frame, 3)
+
+	local st = Instance.new("UIStroke")
+	st.Color = color
+	st.Thickness = BOX_THICKNESS
+	st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	st.Parent = frame
+
+	local label
+	if labelText then
+		label = Instance.new("TextLabel")
+		label.Name = "Name"
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.GothamBold
+		label.TextSize = 13
+		label.Text = labelText
+		label.TextColor3 = color
+		label.TextStrokeTransparency = 0
+		label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+		label.TextXAlignment = Enum.TextXAlignment.Center
+		label.Visible = false
+		label.ZIndex = 3
+		label.Parent = parentGui
+	end
+
+	local entry = {
+		obj = obj,
+		frame = frame,
+		label = label,
+		staticLabel = labelText,
+		lastPos = getPos(obj),
+		stationaryTime = 0,
+		active = true,
+	}
+	return entry
+end
+
+local function destroyEntry(entry)
+	if not entry then return end
+	pcall(function() entry.frame:Destroy() end)
+	if entry.label then pcall(function() entry.label:Destroy() end) end
+end
+
+local function updateBoxEntry(entry, cam, maxDist)
+	local obj = entry.obj
+	local pos = getPos(obj)
+
+	if maxDist then
+		local p = pos
+		if not p then
+			local ok, p2 = pcall(function() return obj:GetPivot().Position end)
+			if ok then p = p2 end
+		end
+		if not p or (p - cam.CFrame.Position).Magnitude > maxDist then
+			entry.frame.Visible = false
+			if entry.label then entry.label.Visible = false end
+			return false
+		end
+	end
+
+	local minX, minY, maxX, maxY = projectBox(obj, cam)
+	if not minX then
+		entry.frame.Visible = false
+		if entry.label then entry.label.Visible = false end
+		return false
+	end
+
+	local w, h = maxX - minX, maxY - minY
+	entry.frame.Position = UDim2.fromOffset(math.floor(minX), math.floor(minY))
+	entry.frame.Size     = UDim2.fromOffset(math.floor(w), math.floor(h))
+	entry.frame.Visible  = true
+
+	if entry.label then
+		local text = entry.staticLabel or obj.Name
+		if state.ShowDistance then
+			if not pos then
+				local ok, p = pcall(function() return obj:GetPivot().Position end)
+				if ok then pos = p end
+			end
+			if pos then
+				local dist = math.floor((pos - cam.CFrame.Position).Magnitude + 0.5)
+				text = string.format("%s  [%dm]", text, dist)
+			end
+		end
+		entry.label.Text = text
+		entry.label.Position = UDim2.fromOffset(math.floor(minX), math.floor(minY) - 19)
+		entry.label.Size     = UDim2.fromOffset(math.floor(w), 16)
+		entry.label.Visible  = true
+	end
+
+	return true
+end
+
+local function hideEntry(entry)
+	entry.frame.Visible = false
+	if entry.label then entry.label.Visible = false end
+end
+
+-- ==================================================================
+--  DRONE / PART BOX ESP
+-- ==================================================================
+local lookup = {}
+for _, n in ipairs(NAMES) do
+	lookup[stripName(n)] = true
+end
+local function isTarget(name)
+	return lookup[stripName(name)] == true
+end
+
+local partGui = Instance.new("ScreenGui")
+partGui.Name = "XanuDroneESP"
+partGui.ResetOnSpawn = false
+partGui.IgnoreGuiInset = true
+partGui.DisplayOrder = 994
+partGui.Parent = guiRoot()
+
+local tracked = setmetatable({}, { __mode = "k" })
+local addConn = nil
+
+local function dropTracked(obj, entry)
+	destroyEntry(entry)
+	tracked[obj] = nil
+end
+
+local function addPart(obj)
+	if tracked[obj] then return end
+	local isPart  = obj:IsA("BasePart")
+	local isModel = TRACK_MODELS and obj:IsA("Model")
+	if not (isPart or isModel) then return end
+	if not isTarget(obj.Name) then return end
+	if isPart and (obj.Transparency >= 0.99 or obj.LocalTransparencyModifier >= 0.99) then
+		return
+	end
+
+	tracked[obj] = newBoxEntry(partGui, obj, DRONE_BOX_COLOR,
+		DRONE_LABEL and obj.Name or nil)
+
+	obj.Destroying:Connect(function() dropTracked(obj, tracked[obj]) end)
+end
+
+local function pollParts()
+	for obj, entry in pairs(tracked) do
+		local pos = getPos(obj)
+
+		local moved = true
+		if pos and entry.lastPos then
+			moved = (pos - entry.lastPos).Magnitude >= MOVE_THRESHOLD
+		end
+		if pos then entry.lastPos = pos end
+
+		if moved then
+			entry.stationaryTime = 0
+		else
+			entry.stationaryTime += POLL
+		end
+
+		local isStill = entry.stationaryTime >= STATIONARY_TIME
+
+		if isStill and REMOVE_WHEN_STILL then
+			dropTracked(obj, entry)
+		else
+			entry.active = not isStill
+		end
+	end
+end
+
+local function startParts()
+	for _, d in ipairs(Workspace:GetDescendants()) do
+		if d:IsA("BasePart") or (TRACK_MODELS and d:IsA("Model")) then addPart(d) end
+	end
+	addConn = Workspace.DescendantAdded:Connect(function(d)
+		if state.PartESP and (d:IsA("BasePart") or (TRACK_MODELS and d:IsA("Model"))) then
+			task.defer(function() if state.PartESP then addPart(d) end end)
+		end
+	end)
+	pollParts()
+end
+
+local function stopParts()
+	if addConn then pcall(function() addConn:Disconnect() end); addConn = nil end
+	for obj, entry in pairs(tracked) do
+		destroyEntry(entry)
+		tracked[obj] = nil
+	end
+end
+
+-- ==================================================================
+--  FOLDER BOX ESP  (vehicles / antiair)
+-- ==================================================================
+local function makeCatGui(name)
+	local g = Instance.new("ScreenGui")
+	g.Name = name
+	g.ResetOnSpawn = false
+	g.IgnoreGuiInset = true
+	g.DisplayOrder = 995
+	g.Parent = guiRoot()
+	return g
+end
+
+local function catRoots(cat)
+	if cat.rootName then
+		local root = Workspace:FindFirstChild(cat.rootName)
+		if root then return { root } end
+	end
+	return { Workspace }
+end
+
+local function resolveFolders(cat)
+	cat.folders = {}
+
+	local roots = catRoots(cat)
+
+	for _, root in ipairs(roots) do
+		if root ~= Workspace and root:IsA("Folder") then
+			local rn = stripName(root.Name)
+			for _, k in ipairs(cat.keywords) do
+				if rn:find(k, 1, true) then cat.folders[root] = true; break end
+			end
+		end
+
+		for _, d in ipairs(root:GetDescendants()) do
+			if d:IsA("Folder") then
+				local n = stripName(d.Name)
+				for _, k in ipairs(cat.keywords) do
+					if n:find(k, 1, true) then cat.folders[d] = true; break end
+				end
+			end
+		end
+	end
+
+	if next(cat.folders) == nil and cat.fallbackRoot then
+		local root = roots[1]
+		if root and root ~= Workspace then
+			cat.folders[root] = true
+			warn(string.format("[Xanu Hub] %s folder not found - falling back to Workspace.%s",
+				cat.label, cat.rootName))
+		end
+	end
+
+	return cat.folders
+end
+
+local function collectEntities(container, out, depth)
+	if depth > 4 then return end
+	for _, ch in ipairs(container:GetChildren()) do
+		if ch:IsA("Model") then
+			out[#out + 1] = ch
+		elseif ch:IsA("BasePart") then
+			if not (ch.Transparency >= 0.99) then out[#out + 1] = ch end
+		elseif ch:IsA("Folder") then
+			collectEntities(ch, out, depth + 1)
+		end
+	end
+end
+
+local function isUnderAny(obj, folderSet)
+	for f in pairs(folderSet) do
+		if obj == f or obj:IsDescendantOf(f) then return true end
+	end
+	return false
+end
+
+local function refreshCat(cat)
+	if not state[cat.key] then return end
+
+	cat.gui = cat.gui or makeCatGui("Xanu" .. cat.label .. "ESP")
+	cat.entries = cat.entries or setmetatable({}, { __mode = "k" })
+
+	resolveFolders(cat)
+
+	for f in pairs(cat.folders) do
+		local ents = {}
+		collectEntities(f, ents, 0)
+		for _, e in ipairs(ents) do
+			if not cat.entries[e] then
+				cat.entries[e] = newBoxEntry(cat.gui, e, cat.color,
+					cat.useName and e.Name or cat.label)
+				local entry = cat.entries[e]
+				e.Destroying:Connect(function()
+					destroyEntry(entry)
+					cat.entries[e] = nil
+				end)
+			end
+		end
+	end
+
+	for e, entry in pairs(cat.entries) do
+		if not e.Parent or not isUnderAny(e, cat.folders) then
+			destroyEntry(entry)
+			cat.entries[e] = nil
+		end
+	end
+end
+
+local function stopCat(cat)
+	if cat.entries then
+		for e, entry in pairs(cat.entries) do
+			destroyEntry(entry)
+			cat.entries[e] = nil
+		end
+	end
+	cat.folders = {}
+	if cat.gui then
+		pcall(function() cat.gui:Destroy() end)
+		cat.gui = nil
+	end
+end
+
+-- ==================================================================
+--  PLAYER BOX ESP (by team)
+-- ==================================================================
+local boxGui = Instance.new("ScreenGui")
+boxGui.Name = "XanuPlayerESP"
+boxGui.ResetOnSpawn = false
+boxGui.IgnoreGuiInset = true
+boxGui.DisplayOrder = 996
+boxGui.Parent = guiRoot()
+
+local playerData = {}
+
+local function teamCategory(plr)
+	local ok, team = pcall(function() return plr.Team end)
+	if not ok or team == nil then return nil end
+	local n = string.lower(team.Name)
+	if string.find(n, "civil", 1, true) then return "Civilian" end
+	if string.find(n, "defend", 1, true) then return "Defender" end
+	if string.find(n, "oper", 1, true) then return "Operator" end
+	return nil
+end
+
+local function removeBox(plr)
+	local d = playerData[plr]
+	if d then
+		destroyEntry(d.entry)
+		playerData[plr] = nil
+	end
+end
+
+local function createBox(plr, cat)
+	local col = TEAM_COLORS[cat] or AC.text
+	local char = plr.Character
+	local d = {
+		entry = newBoxEntry(boxGui, char, col, plr.Name),
+		cat = cat,
+	}
+	playerData[plr] = d
+
+	plr.CharacterRemoving:Connect(function() removeBox(plr) end)
+	return d
+end
+
+local function pollPlayers()
+	local anyOn = state.CivilianESP or state.DefenderESP or state.OperatorESP
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer then
+			local cat = teamCategory(plr)
+			local on  = anyOn and cat ~= nil and state[cat .. "ESP"]
+			local char = plr.Character
+			local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+			local hum  = char and char:FindFirstChildOfClass("Humanoid")
+
+			if on and hrp and hum and hum.Health > 0 then
+				local d = playerData[plr]
+				if not d or d.cat ~= cat or d.entry.obj ~= char then
+					removeBox(plr)
+					d = createBox(plr, cat)
+				end
+				d.entry.active = true
+			else
+				removeBox(plr)
+			end
+		end
+	end
+
+	for plr in pairs(playerData) do
+		if not plr.Parent then removeBox(plr) end
+	end
+end
+
+-- ==================================================================
+--  PER-FRAME BOX GEOMETRY
+-- ==================================================================
+RunService.RenderStepped:Connect(function()
+	local cam = Workspace.CurrentCamera
+	if not cam then return end
+
+	if state.PartESP then
+		for obj, entry in pairs(tracked) do
+			if entry.active then
+				local dist = INFINITE_RANGE and nil or MAX_DIST
+				if not updateBoxEntry(entry, cam, dist) then hideEntry(entry) end
+			else
+				hideEntry(entry)
+			end
+		end
+	end
+
+	for _, cat in pairs(FOLDER_CATS) do
+		if state[cat.key] and cat.entries then
+			for e, entry in pairs(cat.entries) do
+				updateBoxEntry(entry, cam, nil)
+			end
+		end
+	end
+
+	local playerDist = state.PlayerInfinite and nil or state.PlayerRange
+	for plr, d in pairs(playerData) do
+		updateBoxEntry(d.entry, cam, playerDist)
+	end
+end)
+
+-- ====================== MAIN LOOP ======================
+local acc, rescanAcc = 0, 0
+RunService.Heartbeat:Connect(function(dt)
+	acc += dt
+	if acc >= POLL then
+		acc = 0
+		if state.PartESP then pollParts() end
+		pollPlayers()
+	end
+
+	rescanAcc += dt
+	if rescanAcc >= FOLDER_RESCAN then
+		rescanAcc = 0
+		for _, cat in pairs(FOLDER_CATS) do
+			if state[cat.key] then refreshCat(cat) end
+		end
+	end
+end)
+
+-- ==================================================================
+--  UI COMPONENTS
+-- ==================================================================
+local uiRefs = {}
+
+local function addToggle(parent, labelText, key, onChange)
+	local row = Instance.new("TextButton")
+	row.Size = UDim2.new(1, 0, 0, 34)
+	row.BackgroundColor3 = AC.row
+	row.BorderSizePixel = 0
+	row.Text = ""
+	row.AutoButtonColor = false
+	row.Parent = parent
+	corner(row, 7)
+	local st = stroke(row, AC.acc1, 1)
+	st.Transparency = 1
+
+	local lbl = Instance.new("TextLabel")
+	lbl.BackgroundTransparency = 1
+	lbl.Position = UDim2.new(0, 12, 0, 0)
+	lbl.Size = UDim2.new(1, -80, 1, 0)
+	lbl.Font = Enum.Font.GothamMedium
+	lbl.Text = labelText
+	lbl.TextColor3 = AC.text
+	lbl.TextSize = 14
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.Parent = row
+
+	local pill = Instance.new("TextLabel")
+	pill.Size = UDim2.new(0, 44, 0, 20)
+	pill.Position = UDim2.new(1, -54, 0.5, -10)
+	pill.BackgroundColor3 = AC.off
+	pill.Text = "OFF"
+	pill.Font = Enum.Font.GothamBold
+	pill.TextSize = 12
+	pill.TextColor3 = AC.text
+	pill.BorderSizePixel = 0
+	pill.Parent = row
+	corner(pill, 10)
+
+	local function refresh()
+		local on = state[key] == true
+		pill.Text = on and "ON" or "OFF"
+		pill.BackgroundColor3 = on and AC.on or AC.off
+		st.Transparency = on and 0 or 1
+	end
+
+	local function set(value)
+		value = value and true or false
+		if state[key] == value then return end
+		state[key] = value
+		refresh()
+		if onChange then onChange(value) end
+	end
+
+	row.MouseButton1Click:Connect(function() set(not state[key]) end)
+	refresh()
+	return { set = set, refresh = refresh, row = row }
+end
+
+local function addHeader(parent, text)
+	local h = Instance.new("TextLabel")
+	h.Size = UDim2.new(1, 0, 0, 22)
+	h.BackgroundTransparency = 1
+	h.Font = Enum.Font.GothamBold
+	h.Text = text
+	h.TextColor3 = AC.sub
+	h.TextSize = 12
+	h.TextXAlignment = Enum.TextXAlignment.Left
+	h.Parent = parent
+	return h
+end
+
+local function addSlider(parent, labelText, minV, maxV, key, isInfiniteFn, onChange)
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, 0, 0, 48)
+	row.BackgroundColor3 = AC.row
+	row.BorderSizePixel = 0
+	row.Parent = parent
+	corner(row, 7)
+
+	local lbl = Instance.new("TextLabel")
+	lbl.BackgroundTransparency = 1
+	lbl.Position = UDim2.new(0, 12, 0, 4)
+	lbl.Size = UDim2.new(1, -100, 0, 16)
+	lbl.Font = Enum.Font.GothamMedium
+	lbl.Text = labelText
+	lbl.TextColor3 = AC.text
+	lbl.TextSize = 14
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.Parent = row
+
+	local val = Instance.new("TextLabel")
+	val.BackgroundTransparency = 1
+	val.Position = UDim2.new(1, -100, 0, 4)
+	val.Size = UDim2.new(0, 88, 0, 16)
+	val.Font = Enum.Font.GothamBold
+	val.Text = "0"
+	val.TextColor3 = AC.acc2
+	val.TextSize = 13
+	val.TextXAlignment = Enum.TextXAlignment.Right
+	val.Parent = row
+
+	local track = Instance.new("TextButton")
+	track.Size = UDim2.new(1, -24, 0, 6)
+	track.Position = UDim2.new(0, 12, 0, 30)
+	track.BackgroundColor3 = AC.off
+	track.Text = ""
+	track.AutoButtonColor = false
+	track.BorderSizePixel = 0
+	track.Parent = row
+	corner(track, 3)
+
+	local fill = Instance.new("Frame")
+	fill.Size = UDim2.new(0, 0, 1, 0)
+	fill.BackgroundColor3 = AC.acc1
+	fill.BorderSizePixel = 0
+	fill.Parent = track
+	corner(fill, 3)
+
+	local knob = Instance.new("Frame")
+	knob.Size = UDim2.fromOffset(14, 14)
+	knob.AnchorPoint = Vector2.new(0.5, 0.5)
+	knob.Position = UDim2.new(0, 0, 0.5, 0)
+	knob.BackgroundColor3 = AC.text
+	knob.BorderSizePixel = 0
+	knob.ZIndex = 2
+	knob.Parent = track
+	corner(knob, 7)
+
+	local dragging = false
+
+	local function ratio()
+		return math.clamp((state[key] - minV) / (maxV - minV), 0, 1)
+	end
+
+	local function refresh()
+		local infinite = isInfiniteFn and isInfiniteFn()
+		local r = infinite and 1 or ratio()
+		fill.Size = UDim2.new(r, 0, 1, 0)
+		knob.Position = UDim2.new(r, 0, 0.5, 0)
+		val.Text = infinite and "INFINITE" or (tostring(state[key]) .. " studs")
+		val.TextColor3 = infinite and AC.sub or AC.acc2
+	end
+
+	local function setFromX(x)
+		if isInfiniteFn and isInfiniteFn() then return end
+		local w = math.max(track.AbsoluteSize.X, 1)
+		local rel = math.clamp((x - track.AbsolutePosition.X) / w, 0, 1)
+		local v = math.floor(minV + (maxV - minV) * rel)
+		state[key] = v
+		refresh()
+		if onChange then onChange(v) end
+	end
+
+	track.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			setFromX(input.Position.X)
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch) then
+			setFromX(input.Position.X)
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+
+	refresh()
+	return { refresh = refresh, row = row }
+end
+
+-- ==================================================================
+--  MAIN PANEL
+-- ==================================================================
+local function buildMain()
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "XanuHub"
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = 999
+	sg.Parent = guiRoot()
+
+	local main = Instance.new("Frame")
+	main.Name = "Main"
+	main.Size = UDim2.fromOffset(292, 486)
+	main.Position = UDim2.new(0, 40, 0, 30)
+	main.BackgroundColor3 = AC.panel
+	main.BorderSizePixel = 0
+	main.Active = true
+	main.Parent = sg
+	corner(main, 12)
+	stroke(main, AC.stroke, 1)
+
+	local scale = Instance.new("UIScale")
+	scale.Scale = 0.7
+	scale.Parent = main
+
+	local bar = Instance.new("Frame")
+	bar.Size = UDim2.new(1, 0, 0, 44)
+	bar.BackgroundColor3 = AC.bg
+	bar.BorderSizePixel = 0
+	bar.Parent = main
+	corner(bar, 12)
+
+	local barFix = Instance.new("Frame")
+	barFix.Size = UDim2.new(1, 0, 0, 12)
+	barFix.Position = UDim2.new(0, 0, 1, -12)
+	barFix.BackgroundColor3 = AC.bg
+	barFix.BorderSizePixel = 0
+	barFix.Parent = bar
+
+	local barGrad = Instance.new("UIGradient")
+	barGrad.Color = ColorSequence.new(AC.acc1, AC.acc2)
+	barGrad.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.55),
+		NumberSequenceKeypoint.new(1, 0.88),
+	})
+	barGrad.Parent = bar
+
+	local title = Instance.new("TextLabel")
+	title.BackgroundTransparency = 1
+	title.Position = UDim2.new(0, 15, 0, 0)
+	title.Size = UDim2.new(1, -80, 1, 0)
+	title.Font = Enum.Font.GothamBold
+	title.Text = "XANU HUB"
+	title.TextColor3 = Color3.fromRGB(255, 255, 255)
+	title.TextSize = 16
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = bar
+
+	local ver = Instance.new("TextLabel")
+	ver.BackgroundTransparency = 1
+	ver.Position = UDim2.new(0, 15, 0, 24)
+	ver.Size = UDim2.new(1, -80, 0, 12)
+	ver.Font = Enum.Font.Gotham
+	ver.Text = "v1.2"
+	ver.TextColor3 = Color3.fromRGB(210, 210, 225)
+	ver.TextSize = 9
+	ver.TextXAlignment = Enum.TextXAlignment.Left
+	ver.Parent = bar
+
+	local close = Instance.new("TextButton")
+	close.Size = UDim2.fromOffset(26, 26)
+	close.Position = UDim2.new(1, -34, 0.5, -13)
+	close.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+	close.Text = "X"
+	close.Font = Enum.Font.GothamBold
+	close.TextSize = 13
+	close.TextColor3 = Color3.fromRGB(255, 255, 255)
+	close.AutoButtonColor = false
+	close.BorderSizePixel = 0
+	close.Parent = bar
+	corner(close, 6)
+	close.MouseButton1Click:Connect(function() sg.Enabled = false end)
+
+	makeDraggable(main, bar)
+
+	local list = Instance.new("ScrollingFrame")
+	list.Position = UDim2.new(0, 14, 0, 56)
+	list.Size = UDim2.new(1, -28, 1, -70)
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.ScrollBarThickness = 4
+	list.ScrollBarImageColor3 = AC.stroke
+	list.CanvasSize = UDim2.new(0, 0, 0, 0)
+	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	list.Parent = main
+
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 7)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = list
+
+	addHeader(list, "VEHICLES / DRONES").LayoutOrder = 1
+
+	uiRefs.PartESP = addToggle(list, "Drone Box ESP (infinite)", "PartESP", function(on)
+		if on then startParts() else stopParts() end
+	end)
+	uiRefs.PartESP.row.LayoutOrder = 2
+
+	uiRefs.VehicleESP = addToggle(list, "Vehicle Box ESP", "VehicleESP", function(on)
+		if on then refreshCat(FOLDER_CATS.Vehicle) else stopCat(FOLDER_CATS.Vehicle) end
+	end)
+	uiRefs.VehicleESP.row.LayoutOrder = 3
+
+	uiRefs.AntiairESP = addToggle(list, "Antiair Box ESP", "AntiairESP", function(on)
+		if on then refreshCat(FOLDER_CATS.Antiair) else stopCat(FOLDER_CATS.Antiair) end
+	end)
+	uiRefs.AntiairESP.row.LayoutOrder = 4
+
+	addHeader(list, "PLAYER BOX ESP").LayoutOrder = 5
+
+	uiRefs.CivilianESP = addToggle(list, "Civilian Box ESP", "CivilianESP", function()
+		pollPlayers()
+	end)
+	uiRefs.CivilianESP.row.LayoutOrder = 6
+	uiRefs.DefenderESP = addToggle(list, "Defender Box ESP", "DefenderESP", function()
+		pollPlayers()
+	end)
+	uiRefs.DefenderESP.row.LayoutOrder = 7
+	uiRefs.OperatorESP = addToggle(list, "Operator Box ESP", "OperatorESP", function()
+		pollPlayers()
+	end)
+	uiRefs.OperatorESP.row.LayoutOrder = 8
+
+	addHeader(list, "SETTINGS").LayoutOrder = 9
+
+	local rangeSlider = addSlider(list, "Player ESP Range", RANGE_MIN, RANGE_MAX,
+		"PlayerRange", function() return state.PlayerInfinite end)
+	rangeSlider.row.LayoutOrder = 10
+
+	uiRefs.PlayerInfinite = addToggle(list, "Player ESP Infinite", "PlayerInfinite",
+		function() rangeSlider.refresh() end)
+	uiRefs.PlayerInfinite.row.LayoutOrder = 11
+
+	local distRow = addToggle(list, "Show Distance", "ShowDistance")
+	distRow.row.LayoutOrder = 12
+
+	local foot = Instance.new("TextLabel")
+	foot.Size = UDim2.new(1, 0, 0, 18)
+	foot.BackgroundTransparency = 1
+	foot.Font = Enum.Font.Gotham
+	foot.Text = "RightShift = Drone ESP   |   Insert = hide UI"
+	foot.TextColor3 = AC.sub
+	foot.TextSize = 11
+	foot.Parent = list
+	foot.LayoutOrder = 13
+
+	uiRefs.PlayerInfinite.refresh()
+	rangeSlider.refresh()
+
+	TweenService:Create(scale,
+		TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Scale = 1 }):Play()
+
+	UserInputService.InputBegan:Connect(function(input, gp)
+		if gp then return end
+		if input.KeyCode == Enum.KeyCode.RightShift then
+			uiRefs.PartESP.set(not state.PartESP)
+		elseif input.KeyCode == Enum.KeyCode.Insert then
+			sg.Enabled = not sg.Enabled
+		end
+	end)
+
+	return sg
+end
+
+-- ==================================================================
+--  KEY GATE  +  animations
+-- ==================================================================
+local function buildKeyGate()
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "XanuKeyGate"
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = 1000
+	sg.Parent = guiRoot()
+
+	local box = Instance.new("Frame")
+	box.Size = UDim2.fromOffset(330, 200)
+	box.Position = UDim2.new(0.5, -165, 0.5, -100)
+	box.BackgroundColor3 = AC.panel
+	box.BorderSizePixel = 0
+	box.Active = true
+	box.Parent = sg
+	corner(box, 12)
+	stroke(box, AC.stroke, 1)
+
+	local scale = Instance.new("UIScale")
+	scale.Scale = 0.8
+	scale.Parent = box
+
+	local top = Instance.new("Frame")
+	top.Size = UDim2.new(1, 0, 0, 48)
+	top.BackgroundColor3 = AC.bg
+	top.BorderSizePixel = 0
+	top.Parent = box
+	corner(top, 12)
+
+	local topFix = Instance.new("Frame")
+	topFix.Size = UDim2.new(1, 0, 0, 12)
+	topFix.Position = UDim2.new(0, 0, 1, -12)
+	topFix.BackgroundColor3 = AC.bg
+	topFix.BorderSizePixel = 0
+	topFix.Parent = top
+
+	local grad = Instance.new("UIGradient")
+	grad.Color = ColorSequence.new(AC.acc1, AC.acc2)
+	grad.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.55),
+		NumberSequenceKeypoint.new(1, 0.88),
+	})
+	grad.Parent = top
+
+	local t = Instance.new("TextLabel")
+	t.BackgroundTransparency = 1
+	t.Size = UDim2.fromScale(1, 1)
+	t.Font = Enum.Font.GothamBold
+	t.Text = "XANU HUB  -  KEY"
+	t.TextColor3 = Color3.fromRGB(255, 255, 255)
+	t.TextSize = 16
+	t.Parent = top
+
+	local sub = Instance.new("TextLabel")
+	sub.BackgroundTransparency = 1
+	sub.Position = UDim2.new(0, 0, 0, 62)
+	sub.Size = UDim2.new(1, 0, 0, 18)
+	sub.Font = Enum.Font.Gotham
+	sub.Text = "Enter access key to continue"
+	sub.TextColor3 = AC.sub
+	sub.TextSize = 12
+	sub.Parent = box
+
+	local entry = Instance.new("TextBox")
+	entry.Size = UDim2.new(1, -40, 0, 38)
+	entry.Position = UDim2.new(0, 20, 0, 88)
+	entry.BackgroundColor3 = AC.bg
+	entry.BorderSizePixel = 0
+	entry.Font = Enum.Font.GothamMedium
+	entry.PlaceholderText = "key..."
+	entry.Text = ""
+	entry.ClearTextOnFocus = false
+	entry.TextColor3 = AC.text
+	entry.PlaceholderColor3 = AC.sub
+	entry.TextSize = 14
+	entry.Parent = box
+	corner(entry, 8)
+	stroke(entry, AC.stroke, 1)
+
+	local go = Instance.new("TextButton")
+	go.Size = UDim2.new(1, -40, 0, 38)
+	go.Position = UDim2.new(0, 20, 0, 134)
+	go.BackgroundColor3 = AC.acc1
+	go.BorderSizePixel = 0
+	go.Font = Enum.Font.GothamBold
+	go.Text = "UNLOCK"
+	go.TextColor3 = Color3.fromRGB(255, 255, 255)
+	go.TextSize = 14
+	go.AutoButtonColor = false
+	go.Parent = box
+	corner(go, 8)
+
+	local status = Instance.new("TextLabel")
+	status.BackgroundTransparency = 1
+	status.Position = UDim2.new(0, 0, 1, -22)
+	status.Size = UDim2.new(1, 0, 0, 18)
+	status.Font = Enum.Font.Gotham
+	status.Text = ""
+	status.TextColor3 = Color3.fromRGB(255, 90, 90)
+	status.TextSize = 12
+	status.Parent = box
+
+	makeDraggable(box, top)
+
+	TweenService:Create(scale,
+		TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Scale = 1 }):Play()
+
+	local busy = false
+	local function attempt()
+		if busy then return end
+		if entry.Text == ACCESS_KEY then
+			busy = true
+			status.TextColor3 = AC.on
+			status.Text = "ACCESS GRANTED"
+			go.Text = "GRANTED"
+			TweenService:Create(go, TweenInfo.new(0.2), { BackgroundColor3 = AC.on }):Play()
+			TweenService:Create(entry, TweenInfo.new(0.2), { BackgroundColor3 = AC.on }):Play()
+			task.wait(0.5)
+
+			TweenService:Create(scale,
+				TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In),
+				{ Scale = 0 }):Play()
+			task.wait(0.32)
+			sg:Destroy()
+			buildMain()
+		else
+			status.TextColor3 = Color3.fromRGB(255, 90, 90)
+			status.Text = "INVALID KEY"
+			entry.Text = ""
+			TweenService:Create(box, TweenInfo.new(0.08),
+				{ Position = UDim2.new(0.5, -175, 0.5, -100) }):Play()
+			task.wait(0.08)
+			TweenService:Create(box, TweenInfo.new(0.08),
+				{ Position = UDim2.new(0.5, -155, 0.5, -100) }):Play()
+		end
+	end
+
+	go.MouseButton1Click:Connect(attempt)
+	entry.FocusLost:Connect(function(enter)
+		if enter then attempt() end
+	end)
+end
+
+-- ==================================================================
+--  LOADING ANIMATION
+-- ==================================================================
+local function buildLoader(done)
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "XanuLoader"
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = 1200
+	sg.Parent = guiRoot()
+
+	local overlay = Instance.new("Frame")
+	overlay.Size = UDim2.fromScale(1, 1)
+	overlay.BackgroundColor3 = AC.bg
+	overlay.BackgroundTransparency = 1
+	overlay.BorderSizePixel = 0
+	overlay.Parent = sg
+
+	local holder = Instance.new("Frame")
+	holder.Size = UDim2.fromOffset(360, 150)
+	holder.Position = UDim2.new(0.5, -180, 0.5, -60)
+	holder.BackgroundTransparency = 1
+	holder.Parent = overlay
+
+	local logo = Instance.new("TextLabel")
+	logo.BackgroundTransparency = 1
+	logo.Position = UDim2.new(0, 0, 0, 0)
+	logo.Size = UDim2.new(1, 0, 0, 44)
+	logo.Font = Enum.Font.GothamBlack
+	logo.Text = "XANU HUB"
+	logo.TextColor3 = Color3.fromRGB(255, 255, 255)
+	logo.TextSize = 40
+	logo.TextTransparency = 1
+	logo.Parent = holder
+
+	local glow = Instance.new("TextLabel")
+	glow.BackgroundTransparency = 1
+	glow.Position = UDim2.new(0, 0, 0, 0)
+	glow.Size = UDim2.new(1, 0, 0, 44)
+	glow.Font = Enum.Font.GothamBlack
+	glow.Text = "XANU HUB"
+	glow.TextColor3 = AC.acc2
+	glow.TextSize = 40
+	glow.TextTransparency = 1
+	glow.ZIndex = 0
+	glow.Parent = holder
+
+	local sub = Instance.new("TextLabel")
+	sub.BackgroundTransparency = 1
+	sub.Position = UDim2.new(0, 0, 0, 46)
+	sub.Size = UDim2.new(1, 0, 0, 16)
+	sub.Font = Enum.Font.Gotham
+	sub.Text = "initializing modules..."
+	sub.TextColor3 = AC.sub
+	sub.TextSize = 12
+	sub.TextTransparency = 1
+	sub.Parent = holder
+
+	local barBg = Instance.new("Frame")
+	barBg.Size = UDim2.fromOffset(300, 8)
+	barBg.Position = UDim2.new(0.5, -150, 0, 82)
+	barBg.BackgroundColor3 = Color3.fromRGB(40, 40, 52)
+	barBg.BorderSizePixel = 0
+	barBg.BackgroundTransparency = 1
+	barBg.Parent = holder
+	corner(barBg, 4)
+
+	local barFill = Instance.new("Frame")
+	barFill.Size = UDim2.new(0, 0, 1, 0)
+	barFill.BackgroundColor3 = AC.acc1
+	barFill.BorderSizePixel = 0
+	barFill.BackgroundTransparency = 1
+	barFill.Parent = barBg
+	corner(barFill, 4)
+
+	local fillGrad = Instance.new("UIGradient")
+	fillGrad.Color = ColorSequence.new(AC.acc1, AC.acc2)
+	fillGrad.Parent = barFill
+
+	local pct = Instance.new("TextLabel")
+	pct.BackgroundTransparency = 1
+	pct.Position = UDim2.new(0, 0, 0, 98)
+	pct.Size = UDim2.new(1, 0, 0, 16)
+	pct.Font = Enum.Font.GothamBold
+	pct.Text = "0%"
+	pct.TextColor3 = AC.text
+	pct.TextSize = 12
+	pct.TextTransparency = 1
+	pct.Parent = holder
+
+	TweenService:Create(overlay, TweenInfo.new(0.25), { BackgroundTransparency = 0.15 }):Play()
+	TweenService:Create(logo, TweenInfo.new(0.35), { TextTransparency = 0 }):Play()
+	TweenService:Create(glow, TweenInfo.new(0.35), { TextTransparency = 0.75 }):Play()
+	TweenService:Create(sub, TweenInfo.new(0.35), { TextTransparency = 0 }):Play()
+	TweenService:Create(barBg, TweenInfo.new(0.35), { BackgroundTransparency = 0 }):Play()
+	TweenService:Create(barFill, TweenInfo.new(0.35), { BackgroundTransparency = 0 }):Play()
+	TweenService:Create(pct, TweenInfo.new(0.35), { TextTransparency = 0 }):Play()
+	TweenService:Create(glow, TweenInfo.new(1.4, Enum.EasingStyle.Sine),
+		{ TextSize = 48, TextTransparency = 1 }):Play()
+
+	task.spawn(function()
+		task.wait(0.3)
+		local t, dur = 0, 1.5
+		while t < dur do
+			local dt = RunService.Heartbeat:Wait()
+			t += dt
+			local p = math.clamp(t / dur, 0, 1)
+			local eased = 1 - (1 - p) ^ 3
+			barFill.Size = UDim2.new(eased, 0, 1, 0)
+			pct.Text = string.format("%d%%", math.floor(eased * 100))
+		end
+		barFill.Size = UDim2.new(1, 0, 1, 0)
+		pct.Text = "100%"
+		sub.Text = "ready"
+		task.wait(0.25)
+
+		TweenService:Create(logo, TweenInfo.new(0.3), { TextTransparency = 1 }):Play()
+		TweenService:Create(sub, TweenInfo.new(0.3), { TextTransparency = 1 }):Play()
+		TweenService:Create(barBg, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
+		TweenService:Create(barFill, TweenInfo.new(0.3), { BackgroundTransparency = 1 }):Play()
+		TweenService:Create(pct, TweenInfo.new(0.3), { TextTransparency = 1 }):Play()
+		TweenService:Create(holder, TweenInfo.new(0.3),
+			{ Position = UDim2.new(0.5, -180, 0.5, -90) }):Play()
+		TweenService:Create(overlay, TweenInfo.new(0.35), { BackgroundTransparency = 1 }):Play()
+		task.wait(0.4)
+		sg:Destroy()
+		done()
+	end)
+end
+
+buildLoader(function()
+	buildKeyGate()
+end)
+
+print("[Xanu Hub] loaded")
