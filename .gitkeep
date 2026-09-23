@@ -32,7 +32,7 @@ local AC = {
 local NAMES = {
 	"flamingo", "neptun", "stormshadow", "kalibr", "shahed136", "lutiy",
 	"gerbera", "fp1", "bober", "shahed107", "lisica", "bm35", "italmas",
-	"molniyauav", "molniya2", "hello", "kub", "darts", "shahed238", "chaklyn",
+	"molniyauav", "molniya2", "privet", "kub", "darts", "shahed238", "chaklyn",
 	"geran5", "ztk", "zhuk", "greywidow", "delta", "geranseeker", "fpv",
 	"fpvvandal", "fpvold", "hornet", "lancet", "swithbl", "x10",
 }
