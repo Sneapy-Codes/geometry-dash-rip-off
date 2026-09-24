@@ -89,11 +89,11 @@ local state = {
 	DefenderESP      = false,
 	OperatorESP      = false,
 	PlayerInfinite   = true,
-	PlayerRange      = 2500,
+	PlayerRange      = 2000000,
 	ShowDistance     = false,
 }
 
-local RANGE_MIN, RANGE_MAX = 100, 500000000000000000
+local RANGE_MIN, RANGE_MAX = 100, 2000000
 
 -- ====================== HELPERS ======================
 local function guiRoot()
