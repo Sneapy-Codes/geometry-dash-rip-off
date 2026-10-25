@@ -1,5 +1,5 @@
 --[[
-	XANU HUB — Drone / Rocket / Vehicle / Antiair / Player Box ESP
+	XANU HUB â€” Drone / Rocket / Vehicle / Antiair / Player Box ESP
 	Access key : ILovenuggets6093Plus
 	Drone ESP  : RightShift
 	Hide/Show  : Insert
@@ -13,7 +13,11 @@ local TweenService     = game:GetService("TweenService")
 local Workspace        = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
-local ACCESS_KEY  = "ILovenuggets6093Plus"
+
+-- must exist before the name sets below are built
+local function stripName(s)
+	return (tostring(s):lower():gsub("[^%w]", ""))
+end
 
 -- ====================== THEME ======================
 local AC = {
@@ -48,6 +52,11 @@ local ANTIAIR_NAMES = {
 	"pantsir",    -- Pantsir
 	"torm1",      -- Tor-M1
 }
+
+local ROCKET_NAME_SET = {}
+for _, n in ipairs(ROCKET_NAMES) do
+	ROCKET_NAME_SET[stripName(n)] = true
+end
 
 local DRONE_BOX_COLOR = Color3.fromRGB(255, 255, 0)
 local ROCKET_BOX_COLOR = Color3.fromRGB(255, 0, 255)
@@ -121,10 +130,6 @@ local function stroke(obj, col, th)
 	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	s.Parent = obj
 	return s
-end
-
-local function stripName(s)
-	return (tostring(s):lower():gsub("[^%w]", ""))
 end
 
 local function makeDraggable(frame, handle)
@@ -201,6 +206,75 @@ local function projectBox(inst, cam)
 	return minX, minY, maxX, maxY
 end
 
+-- Parts whose name (or an ancestor's name) matches the exclusion set are
+-- skipped when computing the box. This stops the antiair / drone box from
+-- growing to cover rockets that stay parented inside them after launch.
+local function isExcludedPart(part, excludeSet)
+	if not excludeSet then return false end
+	if excludeSet[stripName(part.Name)] then return true end
+	local p = part.Parent
+	while p and p ~= Workspace do
+		if excludeSet[stripName(p.Name)] then return true end
+		p = p.Parent
+	end
+	return false
+end
+
+local function collectBoxParts(obj, excludeSet)
+	local parts = {}
+	if obj:IsA("BasePart") then
+		if not isExcludedPart(obj, excludeSet) then parts[1] = obj end
+		return parts
+	end
+	for _, d in ipairs(obj:GetDescendants()) do
+		if d:IsA("BasePart") and not isExcludedPart(d, excludeSet) then
+			parts[#parts + 1] = d
+		end
+	end
+	return parts
+end
+
+local function projectPartsBox(parts, cam)
+	if #parts == 0 then return nil end
+	local minX, minY = math.huge, math.huge
+	local maxX, maxY = -math.huge, -math.huge
+	local any = false
+	local sum, n = Vector3.zero, 0
+
+	for _, part in ipairs(parts) do
+		local cf, size = part.CFrame, part.Size
+		if cf and size then
+			sum += cf.Position
+			n += 1
+			local half = size * 0.5
+			for xi = -1, 1, 2 do
+				for yi = -1, 1, 2 do
+					for zi = -1, 1, 2 do
+						local world = (cf * CFrame.new(half.X * xi, half.Y * yi, half.Z * zi)).Position
+						local vp = cam:WorldToViewportPoint(world)
+						if vp.Z > 0.01 then
+							any = true
+							if vp.X < minX then minX = vp.X end
+							if vp.Y < minY then minY = vp.Y end
+							if vp.X > maxX then maxX = vp.X end
+							if vp.Y > maxY then maxY = vp.Y end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	if not any then return nil end
+	if (maxX - minX) > MAX_BOX_PIXELS or (maxY - minY) > MAX_BOX_PIXELS then return nil end
+
+	local center = sum / math.max(n, 1)
+	if (center - cam.CFrame.Position).Magnitude < MIN_PROJECT_DIST then
+		return nil
+	end
+	return minX, minY, maxX, maxY
+end
+
 local function newBoxEntry(parentGui, obj, color, labelText)
 	local frame = Instance.new("Frame")
 	frame.Name = "Box"
@@ -253,7 +327,7 @@ local function destroyEntry(entry)
 	if entry.label then pcall(function() entry.label:Destroy() end) end
 end
 
-local function updateBoxEntry(entry, cam, maxDist)
+local function updateBoxEntry(entry, cam, maxDist, parts)
 	local obj = entry.obj
 	local pos = getPos(obj)
 
@@ -270,7 +344,12 @@ local function updateBoxEntry(entry, cam, maxDist)
 		end
 	end
 
-	local minX, minY, maxX, maxY = projectBox(obj, cam)
+	local minX, minY, maxX, maxY
+	if parts and #parts > 0 then
+		minX, minY, maxX, maxY = projectPartsBox(parts, cam)
+	else
+		minX, minY, maxX, maxY = projectBox(obj, cam)
+	end
 	if not minX then
 		entry.frame.Visible = false
 		if entry.label then entry.label.Visible = false end
@@ -321,6 +400,7 @@ local NAME_CATS = {
 		fixedLabel     = nil,            -- show the model name
 		stationaryHide = true,
 		names          = NAMES,
+		excludeFromBox = ROCKET_NAME_SET, -- don't let launched rockets grow the drone box
 	},
 	Rocket = {
 		key            = "RocketESP",
@@ -328,6 +408,7 @@ local NAME_CATS = {
 		fixedLabel     = nil,            -- show the model name
 		stationaryHide = true,           -- same behavior as drone ESP
 		names          = ROCKET_NAMES,
+		excludeFromBox = nil,            -- rockets are the box, never exclude their own parts
 	},
 	Antiair = {
 		key            = "AntiairESP",
@@ -335,6 +416,7 @@ local NAME_CATS = {
 		fixedLabel     = "ANTIAIR",
 		stationaryHide = false,          -- antiair sites don't move, always show
 		names          = ANTIAIR_NAMES,
+		excludeFromBox = ROCKET_NAME_SET, -- rockets parented inside the antiair don't grow its box
 	},
 }
 
@@ -379,6 +461,9 @@ local function makeNamedTracker(cat)
 
 	local function poll()
 		for obj, entry in pairs(tracked) do
+			if cat.excludeFromBox then
+				entry.parts = collectBoxParts(obj, cat.excludeFromBox)
+			end
 			local pos = getPos(obj)
 
 			local moved = true
@@ -438,7 +523,7 @@ for _, cat in pairs(NAME_CATS) do
 end
 
 -- ==================================================================
---  FOLDER BOX ESP  (vehicles — SpawnedCars)
+--  FOLDER BOX ESP  (vehicles â€” SpawnedCars)
 -- ==================================================================
 local function makeCatGui(name)
 	local g = Instance.new("ScreenGui")
@@ -642,7 +727,7 @@ RunService.RenderStepped:Connect(function()
 		if state[catKey] then
 			for obj, entry in pairs(tr.tracked) do
 				if entry.active then
-					if not updateBoxEntry(entry, cam, nil) then hideEntry(entry) end
+					if not updateBoxEntry(entry, cam, nil, entry.parts) then hideEntry(entry) end
 				else
 					hideEntry(entry)
 				end
@@ -1050,153 +1135,6 @@ local function buildMain()
 end
 
 -- ==================================================================
---  KEY GATE  +  animations
--- ==================================================================
-local function buildKeyGate()
-	local sg = Instance.new("ScreenGui")
-	sg.Name = "XanuKeyGate"
-	sg.ResetOnSpawn = false
-	sg.IgnoreGuiInset = true
-	sg.DisplayOrder = 1000
-	sg.Parent = guiRoot()
-
-	local box = Instance.new("Frame")
-	box.Size = UDim2.fromOffset(330, 200)
-	box.Position = UDim2.new(0.5, -165, 0.5, -100)
-	box.BackgroundColor3 = AC.panel
-	box.BorderSizePixel = 0
-	box.Active = true
-	box.Parent = sg
-	corner(box, 12)
-	stroke(box, AC.stroke, 1)
-
-	local scale = Instance.new("UIScale")
-	scale.Scale = 0.8
-	scale.Parent = box
-
-	local top = Instance.new("Frame")
-	top.Size = UDim2.new(1, 0, 0, 48)
-	top.BackgroundColor3 = AC.bg
-	top.BorderSizePixel = 0
-	top.Parent = box
-	corner(top, 12)
-
-	local topFix = Instance.new("Frame")
-	topFix.Size = UDim2.new(1, 0, 0, 12)
-	topFix.Position = UDim2.new(0, 0, 1, -12)
-	topFix.BackgroundColor3 = AC.bg
-	topFix.BorderSizePixel = 0
-	topFix.Parent = top
-
-	local grad = Instance.new("UIGradient")
-	grad.Color = ColorSequence.new(AC.acc1, AC.acc2)
-	grad.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.55),
-		NumberSequenceKeypoint.new(1, 0.88),
-	})
-	grad.Parent = top
-
-	local t = Instance.new("TextLabel")
-	t.BackgroundTransparency = 1
-	t.Size = UDim2.fromScale(1, 1)
-	t.Font = Enum.Font.GothamBold
-	t.Text = "XANU HUB  -  KEY"
-	t.TextColor3 = Color3.fromRGB(255, 255, 255)
-	t.TextSize = 16
-	t.Parent = top
-
-	local sub = Instance.new("TextLabel")
-	sub.BackgroundTransparency = 1
-	sub.Position = UDim2.new(0, 0, 0, 62)
-	sub.Size = UDim2.new(1, 0, 0, 18)
-	sub.Font = Enum.Font.Gotham
-	sub.Text = "Enter access key to continue"
-	sub.TextColor3 = AC.sub
-	sub.TextSize = 12
-	sub.Parent = box
-
-	local entry = Instance.new("TextBox")
-	entry.Size = UDim2.new(1, -40, 0, 38)
-	entry.Position = UDim2.new(0, 20, 0, 88)
-	entry.BackgroundColor3 = AC.bg
-	entry.BorderSizePixel = 0
-	entry.Font = Enum.Font.GothamMedium
-	entry.PlaceholderText = "key..."
-	entry.Text = ""
-	entry.ClearTextOnFocus = false
-	entry.TextColor3 = AC.text
-	entry.PlaceholderColor3 = AC.sub
-	entry.TextSize = 14
-	entry.Parent = box
-	corner(entry, 8)
-	stroke(entry, AC.stroke, 1)
-
-	local go = Instance.new("TextButton")
-	go.Size = UDim2.new(1, -40, 0, 38)
-	go.Position = UDim2.new(0, 20, 0, 134)
-	go.BackgroundColor3 = AC.acc1
-	go.BorderSizePixel = 0
-	go.Font = Enum.Font.GothamBold
-	go.Text = "UNLOCK"
-	go.TextColor3 = Color3.fromRGB(255, 255, 255)
-	go.TextSize = 14
-	go.AutoButtonColor = false
-	go.Parent = box
-	corner(go, 8)
-
-	local status = Instance.new("TextLabel")
-	status.BackgroundTransparency = 1
-	status.Position = UDim2.new(0, 0, 1, -22)
-	status.Size = UDim2.new(1, 0, 0, 18)
-	status.Font = Enum.Font.Gotham
-	status.Text = ""
-	status.TextColor3 = Color3.fromRGB(255, 90, 90)
-	status.TextSize = 12
-	status.Parent = box
-
-	makeDraggable(box, top)
-
-	TweenService:Create(scale,
-		TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-		{ Scale = 1 }):Play()
-
-	local busy = false
-	local function attempt()
-		if busy then return end
-		if entry.Text == ACCESS_KEY then
-			busy = true
-			status.TextColor3 = AC.on
-			status.Text = "ACCESS GRANTED"
-			go.Text = "GRANTED"
-			TweenService:Create(go, TweenInfo.new(0.2), { BackgroundColor3 = AC.on }):Play()
-			TweenService:Create(entry, TweenInfo.new(0.2), { BackgroundColor3 = AC.on }):Play()
-			task.wait(0.5)
-
-			TweenService:Create(scale,
-				TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In),
-				{ Scale = 0 }):Play()
-			task.wait(0.32)
-			sg:Destroy()
-			buildMain()
-		else
-			status.TextColor3 = Color3.fromRGB(255, 90, 90)
-			status.Text = "INVALID KEY"
-			entry.Text = ""
-			TweenService:Create(box, TweenInfo.new(0.08),
-				{ Position = UDim2.new(0.5, -175, 0.5, -100) }):Play()
-			task.wait(0.08)
-			TweenService:Create(box, TweenInfo.new(0.08),
-				{ Position = UDim2.new(0.5, -155, 0.5, -100) }):Play()
-		end
-	end
-
-	go.MouseButton1Click:Connect(attempt)
-	entry.FocusLost:Connect(function(enter)
-		if enter then attempt() end
-	end)
-end
-
--- ==================================================================
 --  LOADING ANIMATION
 -- ==================================================================
 local function buildLoader(done)
@@ -1327,7 +1265,7 @@ local function buildLoader(done)
 end
 
 buildLoader(function()
-	buildKeyGate()
+	buildMain()
 end)
 
 print("[Xanu Hub] loaded")
