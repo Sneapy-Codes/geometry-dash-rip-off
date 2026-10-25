@@ -1,8 +1,9 @@
 --[[
-	XANU HUB — Drone / Vehicle / Antiair / Player Box ESP
+	XANU HUB — Drone / Rocket / Vehicle / Antiair / Player Box ESP
 	Access key : ILovenuggets6093Plus
 	Drone ESP  : RightShift
 	Hide/Show  : Insert
+	Rocket ESP : UI toggle (hides when the rocket stops moving, like drone ESP)
 ]]
 
 local Players          = game:GetService("Players")
@@ -28,7 +29,7 @@ local AC = {
 	acc2   = Color3.fromRGB(0, 190, 255),
 }
 
--- ====================== DRONE ESP CONFIG ======================
+-- ====================== NAMED TRACKER CONFIG (drone / rocket / antiair) ======================
 local NAMES = {
 	"flamingo", "neptun", "stormshadow", "kalibr", "shahed136", "lutiy",
 	"gerbera", "fp1", "bober", "shahed107", "lisica", "bm35", "italmas",
@@ -37,36 +38,39 @@ local NAMES = {
 	"fpvvandal", "fpvold", "hornet", "lancet", "swithbl", "x10",
 }
 
+local ROCKET_NAMES = {
+	"stingerrocket", "pantsirrocket", "torrocket",
+	"strelamissle", "iglarocket", "verbarocket",
+}
+
+local ANTIAIR_NAMES = {
+	"strela10",   -- Strela-10
+	"pantsir",    -- Pantsir
+	"torm1",      -- Tor-M1
+}
+
 local DRONE_BOX_COLOR = Color3.fromRGB(255, 255, 0)
-local DRONE_LABEL     = true
+local ROCKET_BOX_COLOR = Color3.fromRGB(255, 0, 255)
+local ANTIAIR_BOX_COLOR = Color3.fromRGB(255, 70, 90)
+
 local INFINITE_RANGE  = true
 local MAX_DIST        = 4000000000000000000
 local POLL            = 0.2
-local TRACK_MODELS    = true
 local MOVE_THRESHOLD  = 0.7
 local STATIONARY_TIME = 1.5
-local REMOVE_WHEN_STILL = false
 local MIN_PROJECT_DIST  = 2
 local MAX_BOX_PIXELS    = 4000
 local FOLDER_RESCAN     = 3
 
+-- ====================== FOLDER TRACKER CONFIG (vehicles) ======================
 local FOLDER_CATS = {
 	Vehicle = {
 		key      = "VehicleESP",
 		color    = Color3.fromRGB(255, 165, 0),
 		label    = "VEHICLE",
 		useName  = false,
-		keywords = { "vehicle", "vehicles", "veh" },
-		rootName = "Structures",
-		fallbackRoot = true,
-	},
-	Antiair = {
-		key      = "AntiairESP",
-		color    = Color3.fromRGB(255, 70, 90),
-		label    = "ANTIAIR",
-		useName  = false,
-		keywords = { "antiair", "antiaircraft", "anti-air" },
-		rootName = nil,
+		keywords = { "spawnedcars", "spawnedcar" },
+		rootName = "SpawnedCars",
 		fallbackRoot = false,
 	},
 }
@@ -83,6 +87,7 @@ local BOX_FILL_ALPHA = 0.88
 -- ====================== STATE ======================
 local state = {
 	PartESP          = false,
+	RocketESP        = false,
 	VehicleESP       = false,
 	AntiairESP       = false,
 	CivilianESP      = false,
@@ -304,95 +309,136 @@ local function hideEntry(entry)
 end
 
 -- ==================================================================
---  DRONE / PART BOX ESP
+--  NAMED TRACKER SYSTEM  (drones / rockets / antiair)
+--  Tracks BaseParts + Models by name. Categories with
+--  stationaryHide = true behave like the drone ESP: the box stops
+--  being drawn once the object has not moved for STATIONARY_TIME.
 -- ==================================================================
-local lookup = {}
-for _, n in ipairs(NAMES) do
-	lookup[stripName(n)] = true
-end
-local function isTarget(name)
-	return lookup[stripName(name)] == true
-end
+local NAME_CATS = {
+	Drone = {
+		key            = "PartESP",
+		color          = DRONE_BOX_COLOR,
+		fixedLabel     = nil,            -- show the model name
+		stationaryHide = true,
+		names          = NAMES,
+	},
+	Rocket = {
+		key            = "RocketESP",
+		color          = ROCKET_BOX_COLOR,
+		fixedLabel     = nil,            -- show the model name
+		stationaryHide = true,           -- same behavior as drone ESP
+		names          = ROCKET_NAMES,
+	},
+	Antiair = {
+		key            = "AntiairESP",
+		color          = ANTIAIR_BOX_COLOR,
+		fixedLabel     = "ANTIAIR",
+		stationaryHide = false,          -- antiair sites don't move, always show
+		names          = ANTIAIR_NAMES,
+	},
+}
 
-local partGui = Instance.new("ScreenGui")
-partGui.Name = "XanuDroneESP"
-partGui.ResetOnSpawn = false
-partGui.IgnoreGuiInset = true
-partGui.DisplayOrder = 994
-partGui.Parent = guiRoot()
-
-local tracked = setmetatable({}, { __mode = "k" })
-local addConn = nil
-
-local function dropTracked(obj, entry)
-	destroyEntry(entry)
-	tracked[obj] = nil
-end
-
-local function addPart(obj)
-	if tracked[obj] then return end
-	local isPart  = obj:IsA("BasePart")
-	local isModel = TRACK_MODELS and obj:IsA("Model")
-	if not (isPart or isModel) then return end
-	if not isTarget(obj.Name) then return end
-	if isPart and (obj.Transparency >= 0.99 or obj.LocalTransparencyModifier >= 0.99) then
-		return
+local function makeNamedTracker(cat)
+	local lookup = {}
+	for _, n in ipairs(cat.names) do
+		lookup[stripName(n)] = true
 	end
 
-	tracked[obj] = newBoxEntry(partGui, obj, DRONE_BOX_COLOR,
-		DRONE_LABEL and obj.Name or nil)
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "Xanu" .. cat.key
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.DisplayOrder = 994
+	gui.Parent = guiRoot()
 
-	obj.Destroying:Connect(function() dropTracked(obj, tracked[obj]) end)
-end
+	local tracked = setmetatable({}, { __mode = "k" })
+	local addConn = nil
+	local running = false
 
-local function pollParts()
-	for obj, entry in pairs(tracked) do
-		local pos = getPos(obj)
-
-		local moved = true
-		if pos and entry.lastPos then
-			moved = (pos - entry.lastPos).Magnitude >= MOVE_THRESHOLD
-		end
-		if pos then entry.lastPos = pos end
-
-		if moved then
-			entry.stationaryTime = 0
-		else
-			entry.stationaryTime += POLL
-		end
-
-		local isStill = entry.stationaryTime >= STATIONARY_TIME
-
-		if isStill and REMOVE_WHEN_STILL then
-			dropTracked(obj, entry)
-		else
-			entry.active = not isStill
-		end
-	end
-end
-
-local function startParts()
-	for _, d in ipairs(Workspace:GetDescendants()) do
-		if d:IsA("BasePart") or (TRACK_MODELS and d:IsA("Model")) then addPart(d) end
-	end
-	addConn = Workspace.DescendantAdded:Connect(function(d)
-		if state.PartESP and (d:IsA("BasePart") or (TRACK_MODELS and d:IsA("Model"))) then
-			task.defer(function() if state.PartESP then addPart(d) end end)
-		end
-	end)
-	pollParts()
-end
-
-local function stopParts()
-	if addConn then pcall(function() addConn:Disconnect() end); addConn = nil end
-	for obj, entry in pairs(tracked) do
+	local function dropTracked(obj, entry)
 		destroyEntry(entry)
 		tracked[obj] = nil
 	end
+
+	local function addObj(obj)
+		if not running then return end
+		if tracked[obj] then return end
+		local isPart  = obj:IsA("BasePart")
+		local isModel = obj:IsA("Model")
+		if not (isPart or isModel) then return end
+		if not lookup[stripName(obj.Name)] then return end
+		if isPart and (obj.Transparency >= 0.99 or obj.LocalTransparencyModifier >= 0.99) then
+			return
+		end
+
+		tracked[obj] = newBoxEntry(gui, obj, cat.color,
+			cat.fixedLabel or obj.Name)
+
+		obj.Destroying:Connect(function() dropTracked(obj, tracked[obj]) end)
+	end
+
+	local function poll()
+		for obj, entry in pairs(tracked) do
+			local pos = getPos(obj)
+
+			local moved = true
+			if pos and entry.lastPos then
+				moved = (pos - entry.lastPos).Magnitude >= MOVE_THRESHOLD
+			end
+			if pos then entry.lastPos = pos end
+
+			if moved then
+				entry.stationaryTime = 0
+			else
+				entry.stationaryTime += POLL
+			end
+
+			local isStill = entry.stationaryTime >= STATIONARY_TIME
+
+			if cat.stationaryHide then
+				entry.active = not isStill
+			else
+				entry.active = true
+			end
+		end
+	end
+
+	local function start()
+		if running then return end
+		running = true
+		for _, d in ipairs(Workspace:GetDescendants()) do
+			if d:IsA("BasePart") or d:IsA("Model") then addObj(d) end
+		end
+		addConn = Workspace.DescendantAdded:Connect(function(d)
+			if d:IsA("BasePart") or d:IsA("Model") then
+				task.defer(addObj, d)
+			end
+		end)
+		poll()
+	end
+
+	local function stop()
+		running = false
+		if addConn then pcall(function() addConn:Disconnect() end); addConn = nil end
+		for obj, entry in pairs(tracked) do
+			dropTracked(obj, entry)
+		end
+	end
+
+	return {
+		start = start, stop = stop, poll = poll,
+		gui = gui, tracked = tracked,
+	}
+end
+
+local trackers = {}
+for _, cat in pairs(NAME_CATS) do
+	trackers[cat.key] = makeNamedTracker(cat)
+	trackers[cat.key].cat = cat
 end
 
 -- ==================================================================
---  FOLDER BOX ESP  (vehicles / antiair)
+--  FOLDER BOX ESP  (vehicles — SpawnedCars)
 -- ==================================================================
 local function makeCatGui(name)
 	local g = Instance.new("ScreenGui")
@@ -406,7 +452,7 @@ end
 
 local function catRoots(cat)
 	if cat.rootName then
-		local root = Workspace:FindFirstChild(cat.rootName)
+		local root = Workspace:FindFirstChild(cat.rootName, true)
 		if root then return { root } end
 	end
 	return { Workspace }
@@ -592,13 +638,14 @@ RunService.RenderStepped:Connect(function()
 	local cam = Workspace.CurrentCamera
 	if not cam then return end
 
-	if state.PartESP then
-		for obj, entry in pairs(tracked) do
-			if entry.active then
-				local dist = INFINITE_RANGE and nil or MAX_DIST
-				if not updateBoxEntry(entry, cam, dist) then hideEntry(entry) end
-			else
-				hideEntry(entry)
+	for catKey, tr in pairs(trackers) do
+		if state[catKey] then
+			for obj, entry in pairs(tr.tracked) do
+				if entry.active then
+					if not updateBoxEntry(entry, cam, nil) then hideEntry(entry) end
+				else
+					hideEntry(entry)
+				end
 			end
 		end
 	end
@@ -623,7 +670,9 @@ RunService.Heartbeat:Connect(function(dt)
 	acc += dt
 	if acc >= POLL then
 		acc = 0
-		if state.PartESP then pollParts() end
+		for catKey, tr in pairs(trackers) do
+			if state[catKey] then tr.poll() end
+		end
 		pollPlayers()
 	end
 
@@ -830,7 +879,7 @@ local function buildMain()
 
 	local main = Instance.new("Frame")
 	main.Name = "Main"
-	main.Size = UDim2.fromOffset(292, 486)
+	main.Size = UDim2.fromOffset(292, 520)
 	main.Position = UDim2.new(0, 40, 0, 30)
 	main.BackgroundColor3 = AC.panel
 	main.BorderSizePixel = 0
@@ -881,7 +930,7 @@ local function buildMain()
 	ver.Position = UDim2.new(0, 15, 0, 24)
 	ver.Size = UDim2.new(1, -80, 0, 12)
 	ver.Font = Enum.Font.Gotham
-	ver.Text = "v1.2"
+	ver.Text = "v1.3"
 	ver.TextColor3 = Color3.fromRGB(210, 210, 225)
 	ver.TextSize = 9
 	ver.TextXAlignment = Enum.TextXAlignment.Left
@@ -922,7 +971,7 @@ local function buildMain()
 	addHeader(list, "VEHICLES / DRONES").LayoutOrder = 1
 
 	uiRefs.PartESP = addToggle(list, "Drone Box ESP (infinite)", "PartESP", function(on)
-		if on then startParts() else stopParts() end
+		if on then trackers.PartESP.start() else trackers.PartESP.stop() end
 	end)
 	uiRefs.PartESP.row.LayoutOrder = 2
 
@@ -932,37 +981,44 @@ local function buildMain()
 	uiRefs.VehicleESP.row.LayoutOrder = 3
 
 	uiRefs.AntiairESP = addToggle(list, "Antiair Box ESP", "AntiairESP", function(on)
-		if on then refreshCat(FOLDER_CATS.Antiair) else stopCat(FOLDER_CATS.Antiair) end
+		if on then trackers.AntiairESP.start() else trackers.AntiairESP.stop() end
 	end)
 	uiRefs.AntiairESP.row.LayoutOrder = 4
 
-	addHeader(list, "PLAYER BOX ESP").LayoutOrder = 5
+	addHeader(list, "ROCKETS").LayoutOrder = 5
+
+	uiRefs.RocketESP = addToggle(list, "Rocket Box ESP", "RocketESP", function(on)
+		if on then trackers.RocketESP.start() else trackers.RocketESP.stop() end
+	end)
+	uiRefs.RocketESP.row.LayoutOrder = 6
+
+	addHeader(list, "PLAYER BOX ESP").LayoutOrder = 7
 
 	uiRefs.CivilianESP = addToggle(list, "Civilian Box ESP", "CivilianESP", function()
 		pollPlayers()
 	end)
-	uiRefs.CivilianESP.row.LayoutOrder = 6
+	uiRefs.CivilianESP.row.LayoutOrder = 8
 	uiRefs.DefenderESP = addToggle(list, "Defender Box ESP", "DefenderESP", function()
 		pollPlayers()
 	end)
-	uiRefs.DefenderESP.row.LayoutOrder = 7
+	uiRefs.DefenderESP.row.LayoutOrder = 9
 	uiRefs.OperatorESP = addToggle(list, "Operator Box ESP", "OperatorESP", function()
 		pollPlayers()
 	end)
-	uiRefs.OperatorESP.row.LayoutOrder = 8
+	uiRefs.OperatorESP.row.LayoutOrder = 10
 
-	addHeader(list, "SETTINGS").LayoutOrder = 9
+	addHeader(list, "SETTINGS").LayoutOrder = 11
 
 	local rangeSlider = addSlider(list, "Player ESP Range", RANGE_MIN, RANGE_MAX,
 		"PlayerRange", function() return state.PlayerInfinite end)
-	rangeSlider.row.LayoutOrder = 10
+	rangeSlider.row.LayoutOrder = 12
 
 	uiRefs.PlayerInfinite = addToggle(list, "Player ESP Infinite", "PlayerInfinite",
 		function() rangeSlider.refresh() end)
-	uiRefs.PlayerInfinite.row.LayoutOrder = 11
+	uiRefs.PlayerInfinite.row.LayoutOrder = 13
 
 	local distRow = addToggle(list, "Show Distance", "ShowDistance")
-	distRow.row.LayoutOrder = 12
+	distRow.row.LayoutOrder = 14
 
 	local foot = Instance.new("TextLabel")
 	foot.Size = UDim2.new(1, 0, 0, 18)
@@ -972,7 +1028,7 @@ local function buildMain()
 	foot.TextColor3 = AC.sub
 	foot.TextSize = 11
 	foot.Parent = list
-	foot.LayoutOrder = 13
+	foot.LayoutOrder = 15
 
 	uiRefs.PlayerInfinite.refresh()
 	rangeSlider.refresh()
