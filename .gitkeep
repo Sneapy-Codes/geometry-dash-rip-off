@@ -1,9 +1,8 @@
 --[[
-	XANU HUB â€” Drone / Rocket / Vehicle / Antiair / Player Box ESP
+	XANU HUB — Drone / Vehicle / Antiair / Player Box ESP
 	Access key : ILovenuggets6093Plus
 	Drone ESP  : RightShift
 	Hide/Show  : Insert
-	Rocket ESP : UI toggle (hides when the rocket stops moving, like drone ESP)
 ]]
 
 local Players          = game:GetService("Players")
@@ -13,11 +12,7 @@ local TweenService     = game:GetService("TweenService")
 local Workspace        = game:GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
-
--- must exist before the name sets below are built
-local function stripName(s)
-	return (tostring(s):lower():gsub("[^%w]", ""))
-end
+local ACCESS_KEY  = "ILovenuggets6093Plus"
 
 -- ====================== THEME ======================
 local AC = {
@@ -33,7 +28,7 @@ local AC = {
 	acc2   = Color3.fromRGB(0, 190, 255),
 }
 
--- ====================== NAMED TRACKER CONFIG (drone / rocket / antiair) ======================
+-- ====================== DRONE ESP CONFIG ======================
 local NAMES = {
 	"flamingo", "neptun", "stormshadow", "kalibr", "shahed136", "lutiy",
 	"gerbera", "fp1", "bober", "shahed107", "lisica", "bm35", "italmas",
@@ -42,44 +37,36 @@ local NAMES = {
 	"fpvvandal", "fpvold", "hornet", "lancet", "swithbl", "x10",
 }
 
-local ROCKET_NAMES = {
-	"stingerrocket", "pantsirrocket", "torrocket",
-	"strelamissle", "iglarocket", "verbarocket",
-}
-
-local ANTIAIR_NAMES = {
-	"strela10",   -- Strela-10
-	"pantsir",    -- Pantsir
-	"torm1",      -- Tor-M1
-}
-
-local ROCKET_NAME_SET = {}
-for _, n in ipairs(ROCKET_NAMES) do
-	ROCKET_NAME_SET[stripName(n)] = true
-end
-
 local DRONE_BOX_COLOR = Color3.fromRGB(255, 255, 0)
-local ROCKET_BOX_COLOR = Color3.fromRGB(255, 0, 255)
-local ANTIAIR_BOX_COLOR = Color3.fromRGB(255, 70, 90)
-
+local DRONE_LABEL     = true
 local INFINITE_RANGE  = true
 local MAX_DIST        = 4000000000000000000
 local POLL            = 0.2
+local TRACK_MODELS    = true
 local MOVE_THRESHOLD  = 0.7
 local STATIONARY_TIME = 1.5
+local REMOVE_WHEN_STILL = false
 local MIN_PROJECT_DIST  = 2
 local MAX_BOX_PIXELS    = 4000
 local FOLDER_RESCAN     = 3
 
--- ====================== FOLDER TRACKER CONFIG (vehicles) ======================
 local FOLDER_CATS = {
 	Vehicle = {
 		key      = "VehicleESP",
 		color    = Color3.fromRGB(255, 165, 0),
 		label    = "VEHICLE",
 		useName  = false,
-		keywords = { "spawnedcars", "spawnedcar" },
-		rootName = "SpawnedCars",
+		keywords = { "vehicle", "vehicles", "veh" },
+		rootName = "Structures",
+		fallbackRoot = true,
+	},
+	Antiair = {
+		key      = "AntiairESP",
+		color    = Color3.fromRGB(255, 70, 90),
+		label    = "ANTIAIR",
+		useName  = false,
+		keywords = { "antiair", "antiaircraft", "anti-air" },
+		rootName = nil,
 		fallbackRoot = false,
 	},
 }
@@ -96,7 +83,6 @@ local BOX_FILL_ALPHA = 0.88
 -- ====================== STATE ======================
 local state = {
 	PartESP          = false,
-	RocketESP        = false,
 	VehicleESP       = false,
 	AntiairESP       = false,
 	CivilianESP      = false,
@@ -130,6 +116,10 @@ local function stroke(obj, col, th)
 	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	s.Parent = obj
 	return s
+end
+
+local function stripName(s)
+	return (tostring(s):lower():gsub("[^%w]", ""))
 end
 
 local function makeDraggable(frame, handle)
@@ -206,75 +196,6 @@ local function projectBox(inst, cam)
 	return minX, minY, maxX, maxY
 end
 
--- Parts whose name (or an ancestor's name) matches the exclusion set are
--- skipped when computing the box. This stops the antiair / drone box from
--- growing to cover rockets that stay parented inside them after launch.
-local function isExcludedPart(part, excludeSet)
-	if not excludeSet then return false end
-	if excludeSet[stripName(part.Name)] then return true end
-	local p = part.Parent
-	while p and p ~= Workspace do
-		if excludeSet[stripName(p.Name)] then return true end
-		p = p.Parent
-	end
-	return false
-end
-
-local function collectBoxParts(obj, excludeSet)
-	local parts = {}
-	if obj:IsA("BasePart") then
-		if not isExcludedPart(obj, excludeSet) then parts[1] = obj end
-		return parts
-	end
-	for _, d in ipairs(obj:GetDescendants()) do
-		if d:IsA("BasePart") and not isExcludedPart(d, excludeSet) then
-			parts[#parts + 1] = d
-		end
-	end
-	return parts
-end
-
-local function projectPartsBox(parts, cam)
-	if #parts == 0 then return nil end
-	local minX, minY = math.huge, math.huge
-	local maxX, maxY = -math.huge, -math.huge
-	local any = false
-	local sum, n = Vector3.zero, 0
-
-	for _, part in ipairs(parts) do
-		local cf, size = part.CFrame, part.Size
-		if cf and size then
-			sum += cf.Position
-			n += 1
-			local half = size * 0.5
-			for xi = -1, 1, 2 do
-				for yi = -1, 1, 2 do
-					for zi = -1, 1, 2 do
-						local world = (cf * CFrame.new(half.X * xi, half.Y * yi, half.Z * zi)).Position
-						local vp = cam:WorldToViewportPoint(world)
-						if vp.Z > 0.01 then
-							any = true
-							if vp.X < minX then minX = vp.X end
-							if vp.Y < minY then minY = vp.Y end
-							if vp.X > maxX then maxX = vp.X end
-							if vp.Y > maxY then maxY = vp.Y end
-						end
-					end
-				end
-			end
-		end
-	end
-
-	if not any then return nil end
-	if (maxX - minX) > MAX_BOX_PIXELS or (maxY - minY) > MAX_BOX_PIXELS then return nil end
-
-	local center = sum / math.max(n, 1)
-	if (center - cam.CFrame.Position).Magnitude < MIN_PROJECT_DIST then
-		return nil
-	end
-	return minX, minY, maxX, maxY
-end
-
 local function newBoxEntry(parentGui, obj, color, labelText)
 	local frame = Instance.new("Frame")
 	frame.Name = "Box"
@@ -327,7 +248,7 @@ local function destroyEntry(entry)
 	if entry.label then pcall(function() entry.label:Destroy() end) end
 end
 
-local function updateBoxEntry(entry, cam, maxDist, parts)
+local function updateBoxEntry(entry, cam, maxDist)
 	local obj = entry.obj
 	local pos = getPos(obj)
 
@@ -344,12 +265,7 @@ local function updateBoxEntry(entry, cam, maxDist, parts)
 		end
 	end
 
-	local minX, minY, maxX, maxY
-	if parts and #parts > 0 then
-		minX, minY, maxX, maxY = projectPartsBox(parts, cam)
-	else
-		minX, minY, maxX, maxY = projectBox(obj, cam)
-	end
+	local minX, minY, maxX, maxY = projectBox(obj, cam)
 	if not minX then
 		entry.frame.Visible = false
 		if entry.label then entry.label.Visible = false end
@@ -388,142 +304,95 @@ local function hideEntry(entry)
 end
 
 -- ==================================================================
---  NAMED TRACKER SYSTEM  (drones / rockets / antiair)
---  Tracks BaseParts + Models by name. Categories with
---  stationaryHide = true behave like the drone ESP: the box stops
---  being drawn once the object has not moved for STATIONARY_TIME.
+--  DRONE / PART BOX ESP
 -- ==================================================================
-local NAME_CATS = {
-	Drone = {
-		key            = "PartESP",
-		color          = DRONE_BOX_COLOR,
-		fixedLabel     = nil,            -- show the model name
-		stationaryHide = true,
-		names          = NAMES,
-		excludeFromBox = ROCKET_NAME_SET, -- don't let launched rockets grow the drone box
-	},
-	Rocket = {
-		key            = "RocketESP",
-		color          = ROCKET_BOX_COLOR,
-		fixedLabel     = nil,            -- show the model name
-		stationaryHide = true,           -- same behavior as drone ESP
-		names          = ROCKET_NAMES,
-		excludeFromBox = nil,            -- rockets are the box, never exclude their own parts
-	},
-	Antiair = {
-		key            = "AntiairESP",
-		color          = ANTIAIR_BOX_COLOR,
-		fixedLabel     = "ANTIAIR",
-		stationaryHide = false,          -- antiair sites don't move, always show
-		names          = ANTIAIR_NAMES,
-		excludeFromBox = ROCKET_NAME_SET, -- rockets parented inside the antiair don't grow its box
-	},
-}
+local lookup = {}
+for _, n in ipairs(NAMES) do
+	lookup[stripName(n)] = true
+end
+local function isTarget(name)
+	return lookup[stripName(name)] == true
+end
 
-local function makeNamedTracker(cat)
-	local lookup = {}
-	for _, n in ipairs(cat.names) do
-		lookup[stripName(n)] = true
+local partGui = Instance.new("ScreenGui")
+partGui.Name = "XanuDroneESP"
+partGui.ResetOnSpawn = false
+partGui.IgnoreGuiInset = true
+partGui.DisplayOrder = 994
+partGui.Parent = guiRoot()
+
+local tracked = setmetatable({}, { __mode = "k" })
+local addConn = nil
+
+local function dropTracked(obj, entry)
+	destroyEntry(entry)
+	tracked[obj] = nil
+end
+
+local function addPart(obj)
+	if tracked[obj] then return end
+	local isPart  = obj:IsA("BasePart")
+	local isModel = TRACK_MODELS and obj:IsA("Model")
+	if not (isPart or isModel) then return end
+	if not isTarget(obj.Name) then return end
+	if isPart and (obj.Transparency >= 0.99 or obj.LocalTransparencyModifier >= 0.99) then
+		return
 	end
 
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "Xanu" .. cat.key
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.DisplayOrder = 994
-	gui.Parent = guiRoot()
+	tracked[obj] = newBoxEntry(partGui, obj, DRONE_BOX_COLOR,
+		DRONE_LABEL and obj.Name or nil)
 
-	local tracked = setmetatable({}, { __mode = "k" })
-	local addConn = nil
-	local running = false
+	obj.Destroying:Connect(function() dropTracked(obj, tracked[obj]) end)
+end
 
-	local function dropTracked(obj, entry)
+local function pollParts()
+	for obj, entry in pairs(tracked) do
+		local pos = getPos(obj)
+
+		local moved = true
+		if pos and entry.lastPos then
+			moved = (pos - entry.lastPos).Magnitude >= MOVE_THRESHOLD
+		end
+		if pos then entry.lastPos = pos end
+
+		if moved then
+			entry.stationaryTime = 0
+		else
+			entry.stationaryTime += POLL
+		end
+
+		local isStill = entry.stationaryTime >= STATIONARY_TIME
+
+		if isStill and REMOVE_WHEN_STILL then
+			dropTracked(obj, entry)
+		else
+			entry.active = not isStill
+		end
+	end
+end
+
+local function startParts()
+	for _, d in ipairs(Workspace:GetDescendants()) do
+		if d:IsA("BasePart") or (TRACK_MODELS and d:IsA("Model")) then addPart(d) end
+	end
+	addConn = Workspace.DescendantAdded:Connect(function(d)
+		if state.PartESP and (d:IsA("BasePart") or (TRACK_MODELS and d:IsA("Model"))) then
+			task.defer(function() if state.PartESP then addPart(d) end end)
+		end
+	end)
+	pollParts()
+end
+
+local function stopParts()
+	if addConn then pcall(function() addConn:Disconnect() end); addConn = nil end
+	for obj, entry in pairs(tracked) do
 		destroyEntry(entry)
 		tracked[obj] = nil
 	end
-
-	local function addObj(obj)
-		if not running then return end
-		if tracked[obj] then return end
-		local isPart  = obj:IsA("BasePart")
-		local isModel = obj:IsA("Model")
-		if not (isPart or isModel) then return end
-		if not lookup[stripName(obj.Name)] then return end
-		if isPart and (obj.Transparency >= 0.99 or obj.LocalTransparencyModifier >= 0.99) then
-			return
-		end
-
-		tracked[obj] = newBoxEntry(gui, obj, cat.color,
-			cat.fixedLabel or obj.Name)
-
-		obj.Destroying:Connect(function() dropTracked(obj, tracked[obj]) end)
-	end
-
-	local function poll()
-		for obj, entry in pairs(tracked) do
-			if cat.excludeFromBox then
-				entry.parts = collectBoxParts(obj, cat.excludeFromBox)
-			end
-			local pos = getPos(obj)
-
-			local moved = true
-			if pos and entry.lastPos then
-				moved = (pos - entry.lastPos).Magnitude >= MOVE_THRESHOLD
-			end
-			if pos then entry.lastPos = pos end
-
-			if moved then
-				entry.stationaryTime = 0
-			else
-				entry.stationaryTime += POLL
-			end
-
-			local isStill = entry.stationaryTime >= STATIONARY_TIME
-
-			if cat.stationaryHide then
-				entry.active = not isStill
-			else
-				entry.active = true
-			end
-		end
-	end
-
-	local function start()
-		if running then return end
-		running = true
-		for _, d in ipairs(Workspace:GetDescendants()) do
-			if d:IsA("BasePart") or d:IsA("Model") then addObj(d) end
-		end
-		addConn = Workspace.DescendantAdded:Connect(function(d)
-			if d:IsA("BasePart") or d:IsA("Model") then
-				task.defer(addObj, d)
-			end
-		end)
-		poll()
-	end
-
-	local function stop()
-		running = false
-		if addConn then pcall(function() addConn:Disconnect() end); addConn = nil end
-		for obj, entry in pairs(tracked) do
-			dropTracked(obj, entry)
-		end
-	end
-
-	return {
-		start = start, stop = stop, poll = poll,
-		gui = gui, tracked = tracked,
-	}
-end
-
-local trackers = {}
-for _, cat in pairs(NAME_CATS) do
-	trackers[cat.key] = makeNamedTracker(cat)
-	trackers[cat.key].cat = cat
 end
 
 -- ==================================================================
---  FOLDER BOX ESP  (vehicles â€” SpawnedCars)
+--  FOLDER BOX ESP  (vehicles / antiair)
 -- ==================================================================
 local function makeCatGui(name)
 	local g = Instance.new("ScreenGui")
@@ -537,7 +406,7 @@ end
 
 local function catRoots(cat)
 	if cat.rootName then
-		local root = Workspace:FindFirstChild(cat.rootName, true)
+		local root = Workspace:FindFirstChild(cat.rootName)
 		if root then return { root } end
 	end
 	return { Workspace }
@@ -723,14 +592,13 @@ RunService.RenderStepped:Connect(function()
 	local cam = Workspace.CurrentCamera
 	if not cam then return end
 
-	for catKey, tr in pairs(trackers) do
-		if state[catKey] then
-			for obj, entry in pairs(tr.tracked) do
-				if entry.active then
-					if not updateBoxEntry(entry, cam, nil, entry.parts) then hideEntry(entry) end
-				else
-					hideEntry(entry)
-				end
+	if state.PartESP then
+		for obj, entry in pairs(tracked) do
+			if entry.active then
+				local dist = INFINITE_RANGE and nil or MAX_DIST
+				if not updateBoxEntry(entry, cam, dist) then hideEntry(entry) end
+			else
+				hideEntry(entry)
 			end
 		end
 	end
@@ -755,9 +623,7 @@ RunService.Heartbeat:Connect(function(dt)
 	acc += dt
 	if acc >= POLL then
 		acc = 0
-		for catKey, tr in pairs(trackers) do
-			if state[catKey] then tr.poll() end
-		end
+		if state.PartESP then pollParts() end
 		pollPlayers()
 	end
 
@@ -964,7 +830,7 @@ local function buildMain()
 
 	local main = Instance.new("Frame")
 	main.Name = "Main"
-	main.Size = UDim2.fromOffset(292, 520)
+	main.Size = UDim2.fromOffset(292, 486)
 	main.Position = UDim2.new(0, 40, 0, 30)
 	main.BackgroundColor3 = AC.panel
 	main.BorderSizePixel = 0
@@ -1015,7 +881,7 @@ local function buildMain()
 	ver.Position = UDim2.new(0, 15, 0, 24)
 	ver.Size = UDim2.new(1, -80, 0, 12)
 	ver.Font = Enum.Font.Gotham
-	ver.Text = "v1.3"
+	ver.Text = "v1.2"
 	ver.TextColor3 = Color3.fromRGB(210, 210, 225)
 	ver.TextSize = 9
 	ver.TextXAlignment = Enum.TextXAlignment.Left
@@ -1056,7 +922,7 @@ local function buildMain()
 	addHeader(list, "VEHICLES / DRONES").LayoutOrder = 1
 
 	uiRefs.PartESP = addToggle(list, "Drone Box ESP (infinite)", "PartESP", function(on)
-		if on then trackers.PartESP.start() else trackers.PartESP.stop() end
+		if on then startParts() else stopParts() end
 	end)
 	uiRefs.PartESP.row.LayoutOrder = 2
 
@@ -1066,44 +932,37 @@ local function buildMain()
 	uiRefs.VehicleESP.row.LayoutOrder = 3
 
 	uiRefs.AntiairESP = addToggle(list, "Antiair Box ESP", "AntiairESP", function(on)
-		if on then trackers.AntiairESP.start() else trackers.AntiairESP.stop() end
+		if on then refreshCat(FOLDER_CATS.Antiair) else stopCat(FOLDER_CATS.Antiair) end
 	end)
 	uiRefs.AntiairESP.row.LayoutOrder = 4
 
-	addHeader(list, "ROCKETS").LayoutOrder = 5
-
-	uiRefs.RocketESP = addToggle(list, "Rocket Box ESP", "RocketESP", function(on)
-		if on then trackers.RocketESP.start() else trackers.RocketESP.stop() end
-	end)
-	uiRefs.RocketESP.row.LayoutOrder = 6
-
-	addHeader(list, "PLAYER BOX ESP").LayoutOrder = 7
+	addHeader(list, "PLAYER BOX ESP").LayoutOrder = 5
 
 	uiRefs.CivilianESP = addToggle(list, "Civilian Box ESP", "CivilianESP", function()
 		pollPlayers()
 	end)
-	uiRefs.CivilianESP.row.LayoutOrder = 8
+	uiRefs.CivilianESP.row.LayoutOrder = 6
 	uiRefs.DefenderESP = addToggle(list, "Defender Box ESP", "DefenderESP", function()
 		pollPlayers()
 	end)
-	uiRefs.DefenderESP.row.LayoutOrder = 9
+	uiRefs.DefenderESP.row.LayoutOrder = 7
 	uiRefs.OperatorESP = addToggle(list, "Operator Box ESP", "OperatorESP", function()
 		pollPlayers()
 	end)
-	uiRefs.OperatorESP.row.LayoutOrder = 10
+	uiRefs.OperatorESP.row.LayoutOrder = 8
 
-	addHeader(list, "SETTINGS").LayoutOrder = 11
+	addHeader(list, "SETTINGS").LayoutOrder = 9
 
 	local rangeSlider = addSlider(list, "Player ESP Range", RANGE_MIN, RANGE_MAX,
 		"PlayerRange", function() return state.PlayerInfinite end)
-	rangeSlider.row.LayoutOrder = 12
+	rangeSlider.row.LayoutOrder = 10
 
 	uiRefs.PlayerInfinite = addToggle(list, "Player ESP Infinite", "PlayerInfinite",
 		function() rangeSlider.refresh() end)
-	uiRefs.PlayerInfinite.row.LayoutOrder = 13
+	uiRefs.PlayerInfinite.row.LayoutOrder = 11
 
 	local distRow = addToggle(list, "Show Distance", "ShowDistance")
-	distRow.row.LayoutOrder = 14
+	distRow.row.LayoutOrder = 12
 
 	local foot = Instance.new("TextLabel")
 	foot.Size = UDim2.new(1, 0, 0, 18)
@@ -1113,7 +972,7 @@ local function buildMain()
 	foot.TextColor3 = AC.sub
 	foot.TextSize = 11
 	foot.Parent = list
-	foot.LayoutOrder = 15
+	foot.LayoutOrder = 13
 
 	uiRefs.PlayerInfinite.refresh()
 	rangeSlider.refresh()
@@ -1132,6 +991,153 @@ local function buildMain()
 	end)
 
 	return sg
+end
+
+-- ==================================================================
+--  KEY GATE  +  animations
+-- ==================================================================
+local function buildKeyGate()
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "XanuKeyGate"
+	sg.ResetOnSpawn = false
+	sg.IgnoreGuiInset = true
+	sg.DisplayOrder = 1000
+	sg.Parent = guiRoot()
+
+	local box = Instance.new("Frame")
+	box.Size = UDim2.fromOffset(330, 200)
+	box.Position = UDim2.new(0.5, -165, 0.5, -100)
+	box.BackgroundColor3 = AC.panel
+	box.BorderSizePixel = 0
+	box.Active = true
+	box.Parent = sg
+	corner(box, 12)
+	stroke(box, AC.stroke, 1)
+
+	local scale = Instance.new("UIScale")
+	scale.Scale = 0.8
+	scale.Parent = box
+
+	local top = Instance.new("Frame")
+	top.Size = UDim2.new(1, 0, 0, 48)
+	top.BackgroundColor3 = AC.bg
+	top.BorderSizePixel = 0
+	top.Parent = box
+	corner(top, 12)
+
+	local topFix = Instance.new("Frame")
+	topFix.Size = UDim2.new(1, 0, 0, 12)
+	topFix.Position = UDim2.new(0, 0, 1, -12)
+	topFix.BackgroundColor3 = AC.bg
+	topFix.BorderSizePixel = 0
+	topFix.Parent = top
+
+	local grad = Instance.new("UIGradient")
+	grad.Color = ColorSequence.new(AC.acc1, AC.acc2)
+	grad.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.55),
+		NumberSequenceKeypoint.new(1, 0.88),
+	})
+	grad.Parent = top
+
+	local t = Instance.new("TextLabel")
+	t.BackgroundTransparency = 1
+	t.Size = UDim2.fromScale(1, 1)
+	t.Font = Enum.Font.GothamBold
+	t.Text = "XANU HUB  -  KEY"
+	t.TextColor3 = Color3.fromRGB(255, 255, 255)
+	t.TextSize = 16
+	t.Parent = top
+
+	local sub = Instance.new("TextLabel")
+	sub.BackgroundTransparency = 1
+	sub.Position = UDim2.new(0, 0, 0, 62)
+	sub.Size = UDim2.new(1, 0, 0, 18)
+	sub.Font = Enum.Font.Gotham
+	sub.Text = "Enter access key to continue"
+	sub.TextColor3 = AC.sub
+	sub.TextSize = 12
+	sub.Parent = box
+
+	local entry = Instance.new("TextBox")
+	entry.Size = UDim2.new(1, -40, 0, 38)
+	entry.Position = UDim2.new(0, 20, 0, 88)
+	entry.BackgroundColor3 = AC.bg
+	entry.BorderSizePixel = 0
+	entry.Font = Enum.Font.GothamMedium
+	entry.PlaceholderText = "key..."
+	entry.Text = ""
+	entry.ClearTextOnFocus = false
+	entry.TextColor3 = AC.text
+	entry.PlaceholderColor3 = AC.sub
+	entry.TextSize = 14
+	entry.Parent = box
+	corner(entry, 8)
+	stroke(entry, AC.stroke, 1)
+
+	local go = Instance.new("TextButton")
+	go.Size = UDim2.new(1, -40, 0, 38)
+	go.Position = UDim2.new(0, 20, 0, 134)
+	go.BackgroundColor3 = AC.acc1
+	go.BorderSizePixel = 0
+	go.Font = Enum.Font.GothamBold
+	go.Text = "UNLOCK"
+	go.TextColor3 = Color3.fromRGB(255, 255, 255)
+	go.TextSize = 14
+	go.AutoButtonColor = false
+	go.Parent = box
+	corner(go, 8)
+
+	local status = Instance.new("TextLabel")
+	status.BackgroundTransparency = 1
+	status.Position = UDim2.new(0, 0, 1, -22)
+	status.Size = UDim2.new(1, 0, 0, 18)
+	status.Font = Enum.Font.Gotham
+	status.Text = ""
+	status.TextColor3 = Color3.fromRGB(255, 90, 90)
+	status.TextSize = 12
+	status.Parent = box
+
+	makeDraggable(box, top)
+
+	TweenService:Create(scale,
+		TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{ Scale = 1 }):Play()
+
+	local busy = false
+	local function attempt()
+		if busy then return end
+		if entry.Text == ACCESS_KEY then
+			busy = true
+			status.TextColor3 = AC.on
+			status.Text = "ACCESS GRANTED"
+			go.Text = "GRANTED"
+			TweenService:Create(go, TweenInfo.new(0.2), { BackgroundColor3 = AC.on }):Play()
+			TweenService:Create(entry, TweenInfo.new(0.2), { BackgroundColor3 = AC.on }):Play()
+			task.wait(0.5)
+
+			TweenService:Create(scale,
+				TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.In),
+				{ Scale = 0 }):Play()
+			task.wait(0.32)
+			sg:Destroy()
+			buildMain()
+		else
+			status.TextColor3 = Color3.fromRGB(255, 90, 90)
+			status.Text = "INVALID KEY"
+			entry.Text = ""
+			TweenService:Create(box, TweenInfo.new(0.08),
+				{ Position = UDim2.new(0.5, -175, 0.5, -100) }):Play()
+			task.wait(0.08)
+			TweenService:Create(box, TweenInfo.new(0.08),
+				{ Position = UDim2.new(0.5, -155, 0.5, -100) }):Play()
+		end
+	end
+
+	go.MouseButton1Click:Connect(attempt)
+	entry.FocusLost:Connect(function(enter)
+		if enter then attempt() end
+	end)
 end
 
 -- ==================================================================
@@ -1265,7 +1271,7 @@ local function buildLoader(done)
 end
 
 buildLoader(function()
-	buildMain()
+	buildKeyGate()
 end)
 
 print("[Xanu Hub] loaded")
